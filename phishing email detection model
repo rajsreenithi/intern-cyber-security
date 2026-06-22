@@ -1,0 +1,67 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+# Email Dataset
+emails = [
+    "Click here to claim your prize",
+    "Your bank account needs verification",
+    "Meeting scheduled at 10 AM",
+    "Project report submitted successfully",
+    "Win a free smartphone now",
+    "Team discussion tomorrow"
+]
+
+labels = [
+    "Phishing",
+    "Phishing",
+    "Safe",
+    "Safe",
+    "Phishing",
+    "Safe"
+]
+
+# Create DataFrame
+dataset = pd.DataFrame({
+    "Email_Text": emails,
+    "Category": labels
+})
+
+# Split Dataset
+x_train, x_test, y_train, y_test = train_test_split(
+    dataset["Email_Text"],
+    dataset["Category"],
+    test_size=0.3,
+    random_state=1
+)
+
+# Convert text to numerical features
+tfidf = TfidfVectorizer()
+train_features = tfidf.fit_transform(x_train)
+test_features = tfidf.transform(x_test)
+
+# Train model
+classifier = MultinomialNB()
+classifier.fit(train_features, y_train)
+
+# Predict
+predictions = classifier.predict(test_features)
+
+# Accuracy
+acc = accuracy_score(y_test, predictions)
+print("Model Accuracy:", acc)
+
+# Confusion Matrix
+cm = confusion_matrix(y_test, predictions)
+print("\nConfusion Matrix:")
+print(cm)
+
+# User Input Test
+mail = ["Verify your account immediately by clicking this link"]
+mail_feature = tfidf.transform(mail)
+
+result = classifier.predict(mail_feature)
+
+print("\nEmail Classification:", result[0])
