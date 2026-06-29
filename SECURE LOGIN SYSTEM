@@ -1,0 +1,179 @@
+import os
+from flask import Flask, render_template_string, redirect, url_for, request, flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from email_validator import validate_email, EmailNotValidError
+
+app = Flask(__name__)
+
+# --- SECURITY ARCHITECTURE CONFIGURATION ---
+# Generate a cryptographically secure random session signing key
+app.config['SECRET_KEY'] = os.urandom(32)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///secure_users.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Strict session cookie hardening configurations
+app.config.update(
+    SESSION_COOKIE_SECURE=False,   # Change to True when moving to a live production HTTPS server
+    SESSION_COOKIE_HTTPONLY=True,  # Mitigates XSS token theft by blocking script access
+    SESSION_COOKIE_SAMESITE='Lax', # Defends against Cross-Site Request Forgery (CSRF)
+)
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+ph = PasswordHasher() # Default settings utilize robust Argon2id algorithm
+
+# --- PARAMETERIZED DATABASE MODEL ---
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(150), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+
+@login_manager.user_loader
+def load_user(user_id):
+    # ORM native queries implicitly parameterize inputs to fully block SQL Injection
+    return User.query.get(int(user_id))
+
+# --- MASTER UI LAYOUT ---
+BASE_LAYOUT = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Secure Auth System</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f4f4f9; display: flex; justify-content: center; }
+        .container { width: 100%; max-width: 400px; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); }
+        h2 { margin-top: 0; color: #333; }
+        input { width: 94%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+        button { width: 100%; padding: 11px; background: #28a745; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #218838; }
+        .flash { padding: 12px; margin-bottom: 20px; border-radius: 4px; font-size: 14px; font-weight: 500; }
+        .danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        a { color: #007BFF; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {{ content | safe }}
+    </div>
+</body>
+</html>
+"""
+
+# --- ROUTE HANDLING ENGINES ---
+
+@app.route('/')
+def home():
+    html_content = '<h2>Home Gateway</h2>Welcome! Please <a href="/login">Login</a> or <a href="/register">Register</a>.'
+    return render_template_string(BASE_LAYOUT, content=html_content)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+
+        # Server-Side Robust Validation Sanitization
+        try:
+            validate_email(email)
+        except EmailNotValidError:
+            flash('Invalid email structural format.', 'danger')
+            return redirect(url_for('register'))
+
+        if len(password) < 8:
+            flash('Password complexity error: Must be at least 8 characters.', 'danger')
+            return redirect(url_for('register'))
+
+        if User.query.filter_by(email=email).first():
+            flash('Security Notice: Email system registry conflict.', 'danger')
+            return redirect(url_for('register'))
+
+        # Secure Hashing via Argon2id
+        hashed_password = ph.hash(password)
+        new_user = User(email=email, password_hash=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+
+        flash('Registration successful! Secure hash generated. Please log in.', 'success')
+        return redirect(url_for('login'))
+
+    form_html = '''
+        <h2>Account Creation</h2>
+        <form method="POST">
+            <input type="email" name="email" placeholder="Enter Registration Email" required><br>
+            <input type="password" name="password" placeholder="Set Secure Password" required><br>
+            <button type="submit">Register Account</button>
+        </form>
+        <p style="margin-top:15px;">Existing user? <a href="/login">Login here</a></p>
+    '''
+    return render_template_string(BASE_LAYOUT, content=form_html)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+
+        user = User.query.filter_by(email=email).first()
+        
+        # Mitigation for User Enumeration: Vague, identical fallback errors
+        generic_error = "Access Denied: Invalid email or password credentials."
+        
+        if not user:
+            flash(generic_error, 'danger')
+            return redirect(url_for('login'))
+
+        try:
+            # Verification computations
+            ph.verify(user.password_hash, password)
+            login_user(user) # Saves context state and implicitly rotates session token identifiers
+            return redirect(url_for('dashboard'))
+        except VerifyMismatchError:
+            flash(generic_error, 'danger')
+            return redirect(url_for('login'))
+
+    form_html = '''
+        <h2>Secure Gateway Login</h2>
+        <form method="POST">
+            <input type="email" name="email" placeholder="Account Email Address" required><br>
+            <input type="password" name="password" placeholder="Account Password" required><br>
+            <button type="submit" style="background:#007BFF;">Authenticate</button>
+        </form>
+        <p style="margin-top:15px;">New entity? <a href="/register">Create an account</a></p>
+    '''
+    return render_template_string(BASE_LAYOUT, content=form_html)
+
+@app.route('/dashboard')
+@login_required # Active session requirement layer protection
+def dashboard():
+    html_content = f'''
+        <h2>Secure User Workspace</h2>
+        <p>Authenticated Identity: <strong>{current_user.email}</strong></p>
+        <p>This perimeter is protected by cryptographic authorization cookies.</p>
+        <br><a href="/logout" style="color: #dc3545; font-weight:bold;">Terminate Session (Logout)</a>
+    '''
+    return render_template_string(BASE_LAYOUT, content=html_content)
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user() # Drops backend state tracking maps and signals browser tracking clears
+    flash('Session terminated successfully.', 'success')
+    return redirect(url_for('login'))
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all() # Automatically maps local structural file sqlite DB
+    app.run(host='127.0.0.1', port=5000, debug=True)
